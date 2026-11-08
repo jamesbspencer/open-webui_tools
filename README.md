@@ -139,6 +139,9 @@ python3 -m unittest discover tests/
 
 ```text
 open-webui_tools/
+├── .github/
+│   └── workflows/
+│       └── test.yml               # GitHub Actions CI matrix (Python 3.10–3.13)
 ├── README.md                      # Project documentation
 ├── install.py                     # Automated Open WebUI deployment script
 ├── tools/
