@@ -18,14 +18,20 @@ The client enables Open WebUI LLMs to interact with remote Ubuntu machines over 
 ```mermaid
 flowchart TD
     UserChat["User in Open WebUI Chat"] -->|"Asks to inspect server / run command"| CheckCreds{"UserValves or Valves credentials"}
-    CheckCreds --> Resolve["Resolve Host, Port, User, Key / Password"]
+    CheckCreds --> AuthCheck{"Override host requested?"}
+    AuthCheck -->|Yes & No User Creds| RequireAdmin{"Caller is Admin?"}
+    RequireAdmin -->|No| Reject["PermissionError (Host override restricted)"]
+    RequireAdmin -->|Yes| Resolve["Resolve Host, Port, User, Key / Password"]
+    AuthCheck -->|No / Personal Creds| Resolve
     Resolve --> Connect["SSH Handshake & Authentication"]
-    Connect --> Exec["Execute remote command with timeout"]
+    Connect --> Exec["Execute remote command with shlex quoting & timeout"]
     Exec --> Truncate["Enforce MAX_OUTPUT_CHARS truncation limit"]
     Truncate --> Return["Return formatted stdout/stderr to LLM"]
 ```
 
 ### Security Controls & Multi-Tenant Isolation
+- **Host Override Guard**: Non-administrators cannot specify arbitrary `host` overrides to connect to foreign servers using shared administrator credentials (SSRF / credential exfiltration prevention).
+- **Command Injection Protection**: All file paths and service names are strictly quoted using `shlex.quote()`. Service names are validated against regex `^[a-zA-Z0-9_\.\-@]+$`.
 - **Per-User Credentials (`UserValves`)**: Each chat user can supply their own personal SSH username, password, or private key (stored in their Open WebUI profile). One user cannot access another user's server credentials.
 - **Masked Secrets**: `SSH_PASSWORD` and `SSH_KEY` are marked with `json_schema_extra={"input": {"type": "password"}}` to ensure they are masked in the UI and never printed in logs or LLM context.
 - **Context-Safe Output Limits**: Output is truncated at `MAX_OUTPUT_CHARS` (default: 8,000 chars) to prevent unbounded terminal output from exhausting LLM context windows.
@@ -72,7 +78,7 @@ Configured by each user under chat session **Controls > Valves**:
 - **Method**: `read_file(remote_path, host=None, max_lines=200)`
   - Reads configuration files (e.g. `/etc/nginx/nginx.conf`, `/etc/netplan/01-netcfg.yaml`).
 - **Method**: `write_file(remote_path, content, host=None)`
-  - Safely writes remote files using Base64 encoding to prevent escaping issues with quotes or special characters.
+  - Safely writes remote files using Base64 encoding and shell quoting to prevent escaping issues.
 
 ### 4. Systemd Service Management
 - **Method**: `manage_service(service_name, action, host=None)`
@@ -93,12 +99,15 @@ python3 tools/ubuntu_ssh_client.py
 
 ### Interactive Python Test
 ```python
+import os
 from tools.ubuntu_ssh_client import Tools
 
 tool = Tools()
 tool.valves.SSH_HOST = "192.168.1.50"
 tool.valves.SSH_USERNAME = "ubuntu"
-tool.valves.SSH_KEY = open("/Users/jspencer/.ssh/id_rsa").read()
+key_path = os.path.expanduser("~/.ssh/id_rsa")
+if os.path.exists(key_path):
+    tool.valves.SSH_KEY = open(key_path).read()
 
 status = tool.get_system_status()
 print("System Status:", status)
@@ -114,7 +123,7 @@ print("Uptime:", res)
 | Symptom / Error | Root Cause | Solution |
 | :--- | :--- | :--- |
 | **`Authentication failed`** | Incorrect username, password, or key mismatch. | Re-check `SSH_USERNAME`, `SSH_PASSWORD`, or verify the public key is in `~/.ssh/authorized_keys` on Ubuntu. |
-| **`Could not parse SSH_KEY`** | Key format not recognized or encrypted without passphrase. | Supply unencrypted OpenSSH or RSA PEM private key string. |
+| **`Could not parse SSH_KEY`** | Key format not recognized or passphrase missing. | Supply unencrypted OpenSSH or RSA PEM private key string, or supply passphrase in `SSH_PASSWORD`. |
+| **`Host override restricted`** | Non-admin user attempted to target foreign host using shared global credentials. | Configure personal SSH credentials in chat Controls > Valves. |
 | **`Connection timed out`** | Firewall blocking port 22 or incorrect IP. | Verify target host IP and security group / `ufw status` allowing port 22. |
 | **`Command output truncated`** | Command produced more characters than `MAX_OUTPUT_CHARS`. | Use `grep`, `head`, or `tail` in the command to filter output, or increase `MAX_OUTPUT_CHARS` in Valves. |
-| **`Permission denied (sudo)`** | Command requires root privileges. | Configure passwordless sudo in `/etc/sudoers` (`ubuntu ALL=(ALL) NOPASSWD:ALL`) for maintenance scripts. |

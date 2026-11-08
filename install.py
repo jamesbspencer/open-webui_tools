@@ -6,12 +6,15 @@ Install / Update tools on an Open WebUI instance (e.g. https://ai.jamesspencer.m
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 TOOLS_METADATA = [
@@ -39,7 +42,7 @@ TOOLS_METADATA = [
 def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
     tool_id = tool_info["id"]
     name = tool_info["name"]
-    file_path = Path(tool_info["file"])
+    file_path = REPO_ROOT / tool_info["file"]
 
     if not file_path.is_file():
         print(f"[-] Error: file not found: {file_path}")
@@ -113,7 +116,7 @@ def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
 
 
 def load_dotenv():
-    env_path = Path(".env")
+    env_path = REPO_ROOT / ".env"
     if env_path.is_file():
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -149,7 +152,7 @@ def main():
         print(f"    {args.url} -> Settings > Account > API Keys > Create New Key")
         print()
         try:
-            api_key = input("Enter your Open WebUI API key: ").strip()
+            api_key = getpass.getpass("Enter your Open WebUI API key: ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nAborted.")
             sys.exit(1)

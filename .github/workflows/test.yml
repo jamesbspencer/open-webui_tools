@@ -23,11 +23,12 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Install dependencies (optional)
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pydantic requests paramiko || true
+        pip install pydantic requests paramiko
 
     - name: Run unit test suite
       run: |
         python -m unittest discover tests/ -v
+

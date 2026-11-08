@@ -8,10 +8,14 @@ requirements: paramiko
 
 from __future__ import annotations
 
+import base64
 import io
 import os
+import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 from typing import Any, Optional
 
@@ -33,7 +37,10 @@ except ImportError:
 try:
     import paramiko
 except ImportError:
-    paramiko = None  # Handled via subprocess ssh fallback or informative error
+    paramiko = None
+
+
+SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\.\-@]+$")
 
 
 class Tools:
@@ -105,50 +112,56 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
-        self._lock = threading.Lock()
 
     def _resolve_connection_params(
         self,
         override_host: Optional[str] = None,
         __user__: Optional[dict] = None,
     ) -> dict[str, Any]:
-        """Resolve host, port, username, password, and private key prioritizing UserValves."""
+        """
+        Resolve host, port, username, password, and private key prioritizing UserValves.
+        Enforces security controls preventing unprivileged users from exfiltrating global credentials.
+        """
         user_valves = None
+        is_admin = False
         if isinstance(__user__, dict):
             user_valves = __user__.get("valves")
+            is_admin = __user__.get("role") == "admin"
 
-        host = (
-            override_host
-            or getattr(user_valves, "SSH_HOST", None)
-            or (user_valves.get("SSH_HOST") if isinstance(user_valves, dict) else None)
-            or self.valves.SSH_HOST
+        user_host = getattr(user_valves, "SSH_HOST", None) or (
+            user_valves.get("SSH_HOST") if isinstance(user_valves, dict) else None
         )
-        port = (
-            getattr(user_valves, "SSH_PORT", None)
-            or (user_valves.get("SSH_PORT") if isinstance(user_valves, dict) else None)
-            or self.valves.SSH_PORT
-            or 22
+        user_port = getattr(user_valves, "SSH_PORT", None) or (
+            user_valves.get("SSH_PORT") if isinstance(user_valves, dict) else None
         )
-        username = (
-            getattr(user_valves, "SSH_USERNAME", None)
-            or (user_valves.get("SSH_USERNAME") if isinstance(user_valves, dict) else None)
-            or self.valves.SSH_USERNAME
+        user_username = getattr(user_valves, "SSH_USERNAME", None) or (
+            user_valves.get("SSH_USERNAME") if isinstance(user_valves, dict) else None
         )
-        password = (
-            getattr(user_valves, "SSH_PASSWORD", None)
-            or (user_valves.get("SSH_PASSWORD") if isinstance(user_valves, dict) else None)
-            or self.valves.SSH_PASSWORD
+        user_password = getattr(user_valves, "SSH_PASSWORD", None) or (
+            user_valves.get("SSH_PASSWORD") if isinstance(user_valves, dict) else None
         )
-        key = (
-            getattr(user_valves, "SSH_KEY", None)
-            or (user_valves.get("SSH_KEY") if isinstance(user_valves, dict) else None)
-            or self.valves.SSH_KEY
+        user_key = getattr(user_valves, "SSH_KEY", None) or (
+            user_valves.get("SSH_KEY") if isinstance(user_valves, dict) else None
         )
 
-        host = host.strip() if host else ""
-        username = username.strip() if username else ""
-        password = password if password else ""
-        key = key.strip() if key else ""
+        has_user_creds = bool((user_password and user_password.strip()) or (user_key and user_key.strip()))
+
+        if override_host and override_host.strip():
+            target_host = override_host.strip()
+            # Security control: Non-admins cannot target an arbitrary host using shared global credentials
+            if not is_admin and not has_user_creds:
+                raise PermissionError(
+                    "Connecting to an override host using shared tool credentials requires the Open WebUI administrator role. "
+                    "Please configure personal SSH credentials in chat Controls > Valves."
+                )
+            host = target_host
+        else:
+            host = (user_host.strip() if user_host else "") or self.valves.SSH_HOST.strip()
+
+        port = user_port or self.valves.SSH_PORT or 22
+        username = (user_username.strip() if user_username else "") or self.valves.SSH_USERNAME.strip()
+        password = user_password if user_password else self.valves.SSH_PASSWORD
+        key = (user_key.strip() if user_key else "") or self.valves.SSH_KEY.strip()
 
         if not host:
             raise ValueError(
@@ -170,8 +183,8 @@ class Tools:
             "host": host,
             "port": int(port),
             "username": username,
-            "password": password,
-            "key": key,
+            "password": password or "",
+            "key": key or "",
             "timeout": timeout,
             "max_output": max_output,
         }
@@ -191,13 +204,15 @@ class Tools:
         command: str,
         params: dict[str, Any],
     ) -> tuple[int, str, str]:
-        """Execute command using the paramiko library."""
+        """Execute command using the paramiko library with bounded memory consumption."""
         client = paramiko.SSHClient()
+        client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         pkey = None
         if params["key"]:
             key_file = io.StringIO(params["key"])
+            passphrase_required = False
             for key_cls in (
                 paramiko.RSAKey,
                 paramiko.Ed25519Key,
@@ -208,8 +223,13 @@ class Tools:
                 try:
                     pkey = key_cls.from_private_key(key_file, password=params["password"] or None)
                     break
+                except paramiko.PasswordRequiredException:
+                    passphrase_required = True
+                    break
                 except Exception:
                     continue
+            if passphrase_required:
+                raise ValueError("SSH_KEY is encrypted with a passphrase. Provide the passphrase in SSH_PASSWORD.")
             if not pkey and not params["password"]:
                 raise ValueError("Could not parse SSH_KEY. Verify it is a valid PEM/OpenSSH private key.")
 
@@ -227,9 +247,19 @@ class Tools:
             stdin, stdout, stderr = client.exec_command(
                 command, timeout=params["timeout"]
             )
-            out_str = stdout.read().decode("utf-8", errors="replace")
-            err_str = stderr.read().decode("utf-8", errors="replace")
+            stdin.close()  # Signal EOF immediately to prevent blocking commands
+
+            # Bounded stream reading to prevent memory exhaustion / OOM
+            read_limit = max(params["max_output"] * 4, 65536)
+            out_bytes = stdout.read(read_limit)
+            err_bytes = stderr.read(read_limit)
+
+            out_str = out_bytes.decode("utf-8", errors="replace")
+            err_str = err_bytes.decode("utf-8", errors="replace")
             exit_code = stdout.channel.recv_exit_status()
+
+            stdout.close()
+            stderr.close()
             return exit_code, out_str, err_str
         finally:
             client.close()
@@ -239,7 +269,7 @@ class Tools:
         command: str,
         params: dict[str, Any],
     ) -> tuple[int, str, str]:
-        """Fallback command execution using system ssh CLI if paramiko is unavailable."""
+        """Fallback command execution using system ssh CLI with secure temp key isolation."""
         ssh_bin = shutil.which("ssh")
         if not ssh_bin:
             raise RuntimeError(
@@ -247,49 +277,66 @@ class Tools:
                 "Install paramiko: pip install paramiko"
             )
 
-        cmd = [
-            ssh_bin,
-            "-p", str(params["port"]),
-            "-o", f"ConnectTimeout={params['timeout']}",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "BatchMode=yes",
-            f"{params['username']}@{params['host']}",
-            command,
-        ]
-
-        # Note: subprocess fallback with passwords requires sshpass; private keys work natively
         env = os.environ.copy()
-        if params["key"]:
-            # If an in-memory key is provided in fallback mode, write to a temp secure file
-            import tempfile
-            with tempfile.NamedTemporaryFile("w", delete=False, mode="w", encoding="utf-8") as f:
-                f.write(params["key"])
-                temp_key = f.name
-            os.chmod(temp_key, 0o600)
-            cmd.insert(1, "-i")
-            cmd.insert(2, temp_key)
-            try:
-                proc = subprocess.run(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=params["timeout"]
-                )
-                return (
-                    proc.returncode,
-                    proc.stdout.decode("utf-8", errors="replace"),
-                    proc.stderr.decode("utf-8", errors="replace"),
-                )
-            finally:
-                if os.path.exists(temp_key):
-                    os.remove(temp_key)
+        batch_mode = ["-o", "BatchMode=yes"]
+        cmd_prefix: list[str] = []
 
-        proc = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=params["timeout"], env=env
-        )
-        return (
-            proc.returncode,
-            proc.stdout.decode("utf-8", errors="replace"),
-            proc.stderr.decode("utf-8", errors="replace"),
-        )
+        if not params["key"] and params["password"]:
+            sshpass_bin = shutil.which("sshpass")
+            if not sshpass_bin:
+                raise RuntimeError(
+                    "SSH password authentication in subprocess fallback mode requires 'sshpass' or the 'paramiko' library. "
+                    "Install paramiko ('pip install paramiko') or configure an SSH private key in SSH_KEY."
+                )
+            cmd_prefix = [sshpass_bin, "-e"]
+            env["SSHPASS"] = params["password"]
+            batch_mode = []
+
+        key_args: list[str] = []
+        temp_dir = None
+        try:
+            if params["key"]:
+                temp_dir = tempfile.mkdtemp(prefix="owui_ssh_")
+                os.chmod(temp_dir, 0o700)
+                temp_key = os.path.join(temp_dir, "id_key")
+                with open(temp_key, "w", encoding="utf-8") as f:
+                    f.write(params["key"])
+                os.chmod(temp_key, 0o600)
+                key_args = ["-i", temp_key]
+
+            cmd = (
+                cmd_prefix
+                + [
+                    ssh_bin,
+                    "-p",
+                    str(int(params["port"])),
+                    "-o",
+                    f"ConnectTimeout={int(params['timeout'])}",
+                ]
+                + key_args
+                + batch_mode
+                + [
+                    "--",
+                    f"{params['username']}@{params['host']}",
+                    command,
+                ]
+            )
+
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=params["timeout"],
+            )
+            return (
+                proc.returncode,
+                proc.stdout.decode("utf-8", errors="replace"),
+                proc.stderr.decode("utf-8", errors="replace"),
+            )
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _run_remote_command(
         self,
@@ -321,8 +368,8 @@ class Tools:
         :param host: Optional target host/IP override if different from configured default.
         :return: Formatted string containing the exit code, standard output, and standard error.
         """
-        params = self._resolve_connection_params(override_host=host, __user__=__user__)
         try:
+            params = self._resolve_connection_params(override_host=host, __user__=__user__)
             exit_code, stdout, stderr = self._run_remote_command(
                 command, override_host=host, __user__=__user__
             )
@@ -351,10 +398,10 @@ class Tools:
         :return: Dictionary containing parsed system health metrics.
         """
         probe_cmd = (
-            "echo '===OS==='; cat /etc/os-release 2>/dev/null; "
-            "echo '===UPTIME==='; uptime; "
-            "echo '===MEM==='; free -m; "
-            "echo '===DISK==='; df -h /"
+            "echo '<<<SECTION:OS>>>'; cat /etc/os-release 2>/dev/null; "
+            "echo '<<<SECTION:UPTIME>>>'; uptime 2>/dev/null; "
+            "echo '<<<SECTION:MEM>>>'; free -m 2>/dev/null; "
+            "echo '<<<SECTION:DISK>>>'; df -h / 2>/dev/null"
         )
         try:
             exit_code, stdout, stderr = self._run_remote_command(
@@ -363,26 +410,36 @@ class Tools:
             if exit_code != 0:
                 return {"error": f"Status probe failed (exit code {exit_code}): {stderr.strip()}"}
 
-            sections = stdout.split("===")
             status: dict[str, Any] = {}
+            for chunk in stdout.split("<<<SECTION:"):
+                if not chunk.strip():
+                    continue
+                sec_name, _, content = chunk.partition(">>>")
+                sec_name = sec_name.strip()
+                content = content.strip()
 
-            for sec in sections:
-                if sec.startswith("OS==="):
-                    content = sec.replace("OS===", "").strip()
+                if sec_name == "OS":
+                    os_vars: dict[str, str] = {}
                     for line in content.splitlines():
                         if "=" in line:
                             k, v = line.split("=", 1)
-                            if k.strip() in ("PRETTY_NAME", "VERSION"):
-                                status["os"] = v.strip().strip('"')
-                                break
-                elif sec.startswith("UPTIME==="):
-                    status["uptime_raw"] = sec.replace("UPTIME===", "").strip()
-                elif sec.startswith("MEM==="):
-                    status["memory_mb"] = sec.replace("MEM===", "").strip().splitlines()
-                elif sec.startswith("DISK==="):
-                    status["disk_root"] = sec.replace("DISK===", "").strip().splitlines()
+                            os_vars[k.strip()] = v.strip().strip('"')
+                    status["os"] = (
+                        os_vars.get("PRETTY_NAME")
+                        or os_vars.get("VERSION")
+                        or os_vars.get("NAME", "Ubuntu Linux")
+                    )
+                elif sec_name == "UPTIME":
+                    status["uptime_raw"] = content
+                elif sec_name == "MEM":
+                    status["memory_mb"] = [l for l in content.splitlines() if l.strip()]
+                elif sec_name == "DISK":
+                    status["disk_root"] = [l for l in content.splitlines() if l.strip()]
 
-            return status if status else {"raw_output": stdout.strip()}
+            params = self._resolve_connection_params(override_host=host, __user__=__user__)
+            if status:
+                return status
+            return {"raw_output": self._truncate_output(stdout.strip(), params["max_output"])}
         except Exception as e:
             return {"error": f"Failed to retrieve system status: {e}"}
 
@@ -401,15 +458,21 @@ class Tools:
         :param max_lines: Maximum number of lines to read (default: 200).
         :return: File contents as string or error message.
         """
-        safe_path = remote_path.strip()
-        cmd = f"head -n {int(max_lines)} {safe_path}"
+        path = remote_path.strip()
+        if not path or "\x00" in path or "\n" in path or "\r" in path:
+            return "Error: Invalid remote file path."
+
+        safe_path = shlex.quote(path)
+        limit = max(1, min(int(max_lines), 5000))
+        cmd = f"head -n {limit} -- {safe_path}"
+
         try:
+            params = self._resolve_connection_params(override_host=host, __user__=__user__)
             exit_code, stdout, stderr = self._run_remote_command(
                 cmd, override_host=host, __user__=__user__
             )
             if exit_code != 0:
-                return f"Error reading file '{safe_path}': {stderr.strip()}"
-            params = self._resolve_connection_params(override_host=host, __user__=__user__)
+                return f"Error reading file '{path}': {stderr.strip()}"
             return self._truncate_output(stdout, params["max_output"])
         except Exception as e:
             return f"Failed to read remote file: {e}"
@@ -429,19 +492,21 @@ class Tools:
         :param host: Optional target host/IP override.
         :return: Status confirmation message.
         """
-        safe_path = remote_path.strip()
-        # Use base64 encoding to transport arbitrary content without escaping issues
-        import base64
+        path = remote_path.strip()
+        if not path or "\x00" in path or "\n" in path or "\r" in path:
+            return "Error: Invalid remote file path."
+
+        safe_path = shlex.quote(path)
         b64_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        cmd = f"echo '{b64_content}' | base64 -d > {safe_path}"
+        cmd = f"echo {shlex.quote(b64_content)} | base64 -d > {safe_path}"
 
         try:
             exit_code, stdout, stderr = self._run_remote_command(
                 cmd, override_host=host, __user__=__user__
             )
             if exit_code != 0:
-                return f"Error writing file '{safe_path}': {stderr.strip()}"
-            return f"Successfully wrote {len(content)} characters to '{safe_path}'."
+                return f"Error writing file '{path}': {stderr.strip()}"
+            return f"Successfully wrote {len(content)} characters to '{path}'."
         except Exception as e:
             return f"Failed to write remote file: {e}"
 
@@ -456,17 +521,26 @@ class Tools:
         Control or inspect systemd services on the Ubuntu server (e.g. nginx, docker, ssh).
 
         :param service_name: Name of the systemd service unit (e.g., 'nginx', 'docker', 'ufw').
-        :param action: Action to perform: 'status', 'start', 'stop', 'restart', 'reload', or 'is-active'.
+        :param action: Action to perform: 'status', 'start', 'stop', 'restart', 'reload', 'is-active', 'enable', or 'disable'.
         :param host: Optional target host/IP override.
         :return: Service status or execution result.
         """
-        allowed_actions = {"status", "start", "stop", "restart", "reload", "is-active", "enable", "disable"}
+        allowed_actions = {
+            "status", "start", "stop", "restart", "reload", "is-active", "enable", "disable"
+        }
         act = action.strip().lower()
         if act not in allowed_actions:
             return f"Invalid action '{action}'. Allowed actions: {', '.join(sorted(allowed_actions))}"
 
         srv = service_name.strip()
-        cmd = f"systemctl {act} {srv}"
+        if not srv or not SERVICE_NAME_PATTERN.match(srv):
+            return (
+                f"Invalid service name '{service_name}'. "
+                "Service unit names must only contain alphanumeric characters, hyphens, underscores, dots, or '@'."
+            )
+
+        safe_srv = shlex.quote(srv)
+        cmd = f"systemctl {act} {safe_srv}"
 
         try:
             exit_code, stdout, stderr = self._run_remote_command(
