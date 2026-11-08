@@ -69,6 +69,22 @@ A remote command execution, service management, and diagnostic tool for Ubuntu L
 
 ---
 
+### 4. Gitea CLI & Open Terminal ([`skills/gitea_cli/SKILL.md`](file:///Users/jspencer/projects/open-webui_tools/skills/gitea_cli/SKILL.md))
+
+An operational runbook for managing Gitea repositories, issues, pull requests, and releases directly from Open WebUI's **Open Terminal** environment.
+
+- **Capabilities**:
+  - Automated non-root installation of the official `tea` CLI binary into `~/.local/bin`.
+  - Profile authentication with personal access tokens (`tea login add`).
+  - Repository operations: list, clone, create, and inspect repositories.
+  - Issue tracking: non-interactive creation, listing, commenting, and closing.
+  - Pull requests: non-interactive PR creation, checkout, review/approval, and merging (squash, merge, rebase).
+  - Releases: create and manage release tags and assets.
+  - Fallback REST API: complete `curl` + `jq` recipes for headless or minimal Open Terminal environments.
+- **Skill**: [`skills/gitea_cli/SKILL.md`](file:///Users/jspencer/projects/open-webui_tools/skills/gitea_cli/SKILL.md)
+
+---
+
 ## Installation in Open WebUI
 
 ### Automated Deployment (`install.py`)
@@ -151,6 +167,8 @@ open-webui_tools/
 │   ├── openwrt_client.py          # OpenWrt ubus JSON-RPC router client tool
 │   └── ubuntu_ssh_client.py       # Ubuntu Linux SSH management client tool
 ├── skills/
+│   ├── gitea_cli/
+│   │   └── SKILL.md               # Gitea CLI (tea) operational runbook and skill
 │   ├── openbao_client/
 │   │   └── SKILL.md               # OpenBao operational runbook and skill
 │   ├── openwrt_client/

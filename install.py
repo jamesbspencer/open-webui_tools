@@ -57,6 +57,12 @@ SKILLS_METADATA = [
         "file": "skills/ubuntu_ssh_client/SKILL.md",
         "description": "Operational runbook and troubleshooting guidance for managing Ubuntu Linux systems via SSH.",
     },
+    {
+        "id": "gitea_cli",
+        "name": "Gitea CLI (tea)",
+        "file": "skills/gitea_cli/SKILL.md",
+        "description": "Operational runbook and guidance for interacting with Gitea repositories, issues, PRs, and releases via tea CLI or REST API in Open Terminal.",
+    },
 ]
 
 
