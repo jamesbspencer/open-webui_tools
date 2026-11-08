@@ -2,128 +2,237 @@
 name: ubuntu-ssh-client
 description: >-
   Operational runbook and guidance for executing remote commands, inspecting system health,
-  managing systemd services, and editing files on Ubuntu Linux servers via SSH using the Open WebUI Tools client.
+  managing systemd services, and editing files on Ubuntu Linux servers via SSH using the Open WebUI Tools client
+  OR directly via OpenSSH CLI in Open Terminal when tool calling is unavailable.
 ---
 
-# Ubuntu SSH Client Skill
+# Ubuntu Linux SSH Management Skill
 
-This skill guides the operation, diagnostic runbooks, and troubleshooting procedures for managing remote Ubuntu Linux servers using the Open WebUI SSH client ([`tools/ubuntu_ssh_client.py`](file:///Users/jspencer/projects/open-webui_tools/tools/ubuntu_ssh_client.py)).
+This skill guides remote management, diagnostics, and operational procedures on Ubuntu Linux servers. It supports two execution environments:
+1. **Mode A: Open WebUI Tool Client** — When the `ubuntu_ssh_client` Python tool is active in the chat.
+2. **Mode B: Open Terminal / Shell Substrate** — When Open WebUI is using `open-terminal` and cannot invoke tools directly, allowing execution via native `ssh`, `scp`, and `sshpass` commands in the terminal container.
 
 ---
 
-## 1. Architecture & Security Model
+## 1. Execution Mode Detection
 
-The client enables Open WebUI LLMs to interact with remote Ubuntu machines over standard SSH (port 22) using either `paramiko` or system `ssh`:
+Before attempting remote server operations, determine your execution context:
 
 ```mermaid
 flowchart TD
-    UserChat["User in Open WebUI Chat"] -->|"Asks to inspect server / run command"| CheckCreds{"UserValves or Valves credentials"}
-    CheckCreds --> AuthCheck{"Override host requested?"}
-    AuthCheck -->|Yes & No User Creds| RequireAdmin{"Caller is Admin?"}
-    RequireAdmin -->|No| Reject["PermissionError (Host override restricted)"]
-    RequireAdmin -->|Yes| Resolve["Resolve Host, Port, User, Key / Password"]
-    AuthCheck -->|No / Personal Creds| Resolve
-    Resolve --> Connect["SSH Handshake & Authentication"]
-    Connect --> Exec["Execute remote command with shlex quoting & timeout"]
-    Exec --> Truncate["Enforce MAX_OUTPUT_CHARS truncation limit"]
-    Truncate --> Return["Return formatted stdout/stderr to LLM"]
+    Start["Request to manage Ubuntu server via SSH"] --> CheckTools{"Are Open WebUI Tools accessible?"}
+    CheckTools -->|Yes| ModeA["Mode A: Invoke ubuntu_ssh_client tool methods"]
+    CheckTools -->|No / Open-Terminal| ModeB["Mode B: Run native OpenSSH commands in terminal"]
 ```
 
-### Security Controls & Multi-Tenant Isolation
-- **Host Override Guard**: Non-administrators cannot specify arbitrary `host` overrides to connect to foreign servers using shared administrator credentials (SSRF / credential exfiltration prevention).
-- **Command Injection Protection**: All file paths and service names are strictly quoted using `shlex.quote()`. Service names are validated against regex `^[a-zA-Z0-9_\.\-@]+$`.
-- **Per-User Credentials (`UserValves`)**: Each chat user can supply their own personal SSH username, password, or private key (stored in their Open WebUI profile). One user cannot access another user's server credentials.
-- **Masked Secrets**: `SSH_PASSWORD` and `SSH_KEY` are marked with `json_schema_extra={"input": {"type": "password"}}` to ensure they are masked in the UI and never printed in logs or LLM context.
-- **Context-Safe Output Limits**: Output is truncated at `MAX_OUTPUT_CHARS` (default: 8,000 chars) to prevent unbounded terminal output from exhausting LLM context windows.
-- **Timeouts**: All connections and commands enforce `SSH_TIMEOUT` (default: 15 seconds) to prevent frozen worker threads.
+- **Use Mode A** if the model has access to the function-calling interface (`execute_command`, `get_system_status`, `read_file`, `write_file`, `manage_service`).
+- **Use Mode B** if you are operating inside an **Open Terminal** container/shell, or if tool calling fails with `Tool not found` or `Tools disabled`.
 
 ---
 
-## 2. Configuration Tiers
+## 2. Mode A: Open WebUI Tool Reference
 
-### Tool-Level Valves (`Valves`)
-Configured in Open WebUI under **Workspace > Tools > Settings**:
-- `SSH_HOST`: Default server hostname or IP address.
-- `SSH_PORT`: SSH port (default: 22).
-- `SSH_TIMEOUT`: Command and connection timeout in seconds (default: 15).
-- `MAX_OUTPUT_CHARS`: Maximum characters returned per command (default: 8000).
-- `SSH_USERNAME` / `SSH_PASSWORD` / `SSH_KEY`: Optional fallback credentials.
-
-### User-Specific Valves (`UserValves`)
-Configured by each user under chat session **Controls > Valves**:
-- `SSH_HOST`: Personal server hostname or IP (overrides tool default if set).
-- `SSH_PORT`: Personal SSH port.
-- `SSH_USERNAME`: Personal SSH username (e.g. `ubuntu`).
-- `SSH_PASSWORD`: Personal password (if password auth is used).
-- `SSH_KEY`: Personal SSH private key in PEM or OpenSSH format (e.g. `-----BEGIN OPENSSH PRIVATE KEY-----`).
-
----
-
-## 3. Tool Methods & Common Operational Workflows
+When tools are bound and accessible, call the Python tool functions directly:
 
 ### 1. Remote Shell Commands
 - **Method**: `execute_command(command, host=None)`
-- **Common Tasks**:
-  - Check disk space: `execute_command("df -h")`
-  - Check process list: `execute_command("ps aux --sort=-%mem | head -n 15")`
-  - Review network sockets: `execute_command("ss -tulpn")`
-  - Check Docker containers: `execute_command("docker ps")`
+- **Behavior**: Executes command with strict timeouts (`SSH_TIMEOUT`) and bounds output to `MAX_OUTPUT_CHARS`.
 
-### 2. System Status Overview
+### 2. Structured System Status
 - **Method**: `get_system_status(host=None)`
-- **Behavior**: Executes a low-overhead composite probe inspecting `/etc/os-release`, `uptime`, `free -m`, and root disk usage `df -h /`.
-- **Output**: Structured dictionary containing OS version, uptime, memory, and disk health.
+- **Behavior**: Runs a composite diagnostic probe returning structured OS version, uptime, load, memory, and root disk metrics.
 
 ### 3. File Operations
 - **Method**: `read_file(remote_path, host=None, max_lines=200)`
   - Reads configuration files (e.g. `/etc/nginx/nginx.conf`, `/etc/netplan/01-netcfg.yaml`).
 - **Method**: `write_file(remote_path, content, host=None)`
-  - Safely writes remote files using Base64 encoding and shell quoting to prevent escaping issues.
+  - Safely writes remote files using Base64 encoding and shell quoting.
 
 ### 4. Systemd Service Management
 - **Method**: `manage_service(service_name, action, host=None)`
 - **Allowed Actions**: `status`, `start`, `stop`, `restart`, `reload`, `is-active`, `enable`, `disable`.
-- **Examples**:
-  - `manage_service(service_name="nginx", action="status")`
-  - `manage_service(service_name="docker", action="restart")`
+
+### Configuration (Valves & UserValves)
+- **Tool Valves (`Valves`)**: Set by admin under **Workspace > Tools > Settings** (`SSH_HOST`, `SSH_PORT`, `SSH_TIMEOUT`, `MAX_OUTPUT_CHARS`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_KEY`).
+- **User Valves (`UserValves`)**: Set by individual users under chat **Controls > Valves** (`SSH_HOST`, `SSH_PORT`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_KEY`).
 
 ---
 
-## 4. Standalone CLI Runbook
+## 3. Mode B: Open Terminal / Shell Playbook (Native OpenSSH)
 
-To test SSH connectivity outside of Open WebUI:
+When operating inside an **Open Terminal** container/shell without access to Open WebUI tools, execute SSH commands directly using the system OpenSSH suite.
+
+### 1. Setup Environment Variables & Keys
+
+Configure connection parameters:
 
 ```bash
-python3 tools/ubuntu_ssh_client.py
+export SSH_HOST="${SSH_HOST:-192.168.1.50}"
+export SSH_PORT="${SSH_PORT:-22}"
+export SSH_USERNAME="${SSH_USERNAME:-ubuntu}"
+export SSH_KEY_FILE="${SSH_KEY_FILE:-$HOME/.ssh/id_rsa}"
+export SSH_TIMEOUT="15"
+
+# If using password authentication instead of private key:
+export SSH_PASSWORD="${SSH_PASSWORD:-}"
 ```
 
-### Interactive Python Test
-```python
-import os
-from tools.ubuntu_ssh_client import Tools
+If an SSH private key is provided as a raw string:
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cat << 'EOF' > ~/.ssh/remote_key
+-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----
+EOF
+chmod 600 ~/.ssh/remote_key
+export SSH_KEY_FILE="$HOME/.ssh/remote_key"
+```
 
-tool = Tools()
-tool.valves.SSH_HOST = "192.168.1.50"
-tool.valves.SSH_USERNAME = "ubuntu"
-key_path = os.path.expanduser("~/.ssh/id_rsa")
-if os.path.exists(key_path):
-    tool.valves.SSH_KEY = open(key_path).read()
+### 2. Define Reusable SSH Execution Helper
 
-status = tool.get_system_status()
-print("System Status:", status)
+Add this helper function to your Open Terminal session for clean, non-blocking execution:
 
-res = tool.execute_command("uptime")
-print("Uptime:", res)
+```bash
+ssh_exec() {
+  local remote_cmd="$1"
+
+  if [ -n "$SSH_PASSWORD" ] && command -v sshpass >/dev/null 2>&1; then
+    SSHPASS="$SSH_PASSWORD" sshpass -e ssh \
+      -p "$SSH_PORT" \
+      -o ConnectTimeout="$SSH_TIMEOUT" \
+      -o StrictHostKeyChecking=accept-new \
+      -n \
+      "$SSH_USERNAME@$SSH_HOST" "$remote_cmd"
+  else
+    ssh \
+      -i "$SSH_KEY_FILE" \
+      -p "$SSH_PORT" \
+      -o ConnectTimeout="$SSH_TIMEOUT" \
+      -o StrictHostKeyChecking=accept-new \
+      -n \
+      "$SSH_USERNAME@$SSH_HOST" "$remote_cmd"
+  fi
+}
+```
+
+> [!TIP]
+> Notice the `-n` flag: it redirects `stdin` from `/dev/null`, preventing background commands or loops from hanging Open Terminal waiting for input.
+
+---
+
+### 3. Structured System Status Probe
+
+Inspect overall server health in a single network round-trip:
+
+```bash
+ssh_exec '
+echo "<<<SECTION:OS>>>"
+cat /etc/os-release 2>/dev/null | grep -E "^(PRETTY_NAME|VERSION_ID)="
+echo "<<<SECTION:UPTIME>>>"
+uptime
+echo "<<<SECTION:MEMORY>>>"
+free -h
+echo "<<<SECTION:DISK>>>"
+df -h /
+'
 ```
 
 ---
 
-## 5. Troubleshooting Common Issues
+### 4. Running Shell Commands & Diagnostics
+
+```bash
+# Check CPU architecture and kernel
+ssh_exec "uname -a"
+
+# List top 10 memory-consuming processes
+ssh_exec "ps aux --sort=-%mem | head -n 11"
+
+# Check active listening network ports
+ssh_exec "ss -tulpn"
+
+# Check Docker containers (if installed)
+ssh_exec "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+```
+
+---
+
+### 5. File Operations
+
+#### Read Remote Files
+```bash
+REMOTE_FILE="/etc/nginx/nginx.conf"
+
+# Read first 100 lines
+ssh_exec "head -n 100 -- '$REMOTE_FILE'"
+
+# Search for directives in configuration
+ssh_exec "grep -rn 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null"
+```
+
+#### Safely Write Remote Files (Base64 Transport)
+To write files safely without escaping quotes or breaking formatting:
+
+```bash
+REMOTE_DEST="/tmp/custom_app.conf"
+CONTENT="server {
+    listen 80;
+    server_name example.local;
+}"
+
+B64=$(echo -n "$CONTENT" | base64)
+ssh_exec "echo '$B64' | base64 -d > '$REMOTE_DEST'"
+echo "[+] Successfully wrote $REMOTE_DEST"
+```
+
+#### Upload via SCP (if local file exists in Open Terminal)
+```bash
+scp -i "$SSH_KEY_FILE" -P "$SSH_PORT" local_file.txt "$SSH_USERNAME@$SSH_HOST:/tmp/"
+```
+
+---
+
+### 6. Systemd Service Management
+
+Always pass `--no-pager` to prevent `systemctl` from hanging in a `less` view:
+
+```bash
+SERVICE="nginx"
+
+# Check status
+ssh_exec "systemctl status $SERVICE --no-pager"
+
+# Check if active (returns active / inactive)
+ssh_exec "systemctl is-active $SERVICE"
+
+# Restart service (requires sudo if not running as root)
+ssh_exec "sudo systemctl restart $SERVICE"
+
+# Inspect latest 30 lines of service journal
+ssh_exec "journalctl -u $SERVICE -n 30 --no-pager"
+```
+
+---
+
+### 7. Interactive / Long-Running Command Precautions
+
+When executing commands over SSH from Open Terminal:
+1. **Never run interactive prompts**: Always add non-interactive flags (e.g. `DEBIAN_FRONTEND=noninteractive apt-get update -y`).
+2. **Handle sudo passwords**: If running sudo commands with password auth, pipe the password via stdin:
+   ```bash
+   ssh_exec "echo '$SSH_PASSWORD' | sudo -S systemctl restart nginx"
+   ```
+3. **Bound Output**: Prevent log flooding by piping commands to `head -n 50` or `tail -n 50`.
+
+---
+
+## 4. Troubleshooting Common Issues
 
 | Symptom / Error | Root Cause | Solution |
 | :--- | :--- | :--- |
-| **`Authentication failed`** | Incorrect username, password, or key mismatch. | Re-check `SSH_USERNAME`, `SSH_PASSWORD`, or verify the public key is in `~/.ssh/authorized_keys` on Ubuntu. |
-| **`Could not parse SSH_KEY`** | Key format not recognized or passphrase missing. | Supply unencrypted OpenSSH or RSA PEM private key string, or supply passphrase in `SSH_PASSWORD`. |
-| **`Host override restricted`** | Non-admin user attempted to target foreign host using shared global credentials. | Configure personal SSH credentials in chat Controls > Valves. |
-| **`Connection timed out`** | Firewall blocking port 22 or incorrect IP. | Verify target host IP and security group / `ufw status` allowing port 22. |
-| **`Command output truncated`** | Command produced more characters than `MAX_OUTPUT_CHARS`. | Use `grep`, `head`, or `tail` in the command to filter output, or increase `MAX_OUTPUT_CHARS` in Valves. |
+| **`Tools disabled / Tool not found`** | Open WebUI is using `open-terminal` without Python tool bindings. | Switch to **Mode B** and use the `ssh_exec` helper or native `ssh` commands. |
+| **`Permission denied (publickey)`** | Private key not matching server's `authorized_keys` or wrong username. | Verify `SSH_USERNAME` and ensure the public key is in `~/.ssh/authorized_keys` on Ubuntu. |
+| **`Host key verification failed`** | Host key mismatch or strict checking on new container. | Pass `-o StrictHostKeyChecking=accept-new` in SSH options. |
+| **`Command hangs indefinitely`** | Process is waiting for `stdin` or interactive pager. | Pass `-n` to SSH, and pass `--no-pager` to `systemctl` and `journalctl`. |
+| **`sudo: a terminal is required to read the password`** | Remote `sudoers` requires a tty (`requiretty`). | Pass `-t` or `-tt` to SSH for a pseudo-terminal: `ssh -tt -i ...`. |

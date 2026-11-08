@@ -2,139 +2,256 @@
 name: openwrt-client
 description: >-
   Operational guide and runbook for querying, configuring, and troubleshooting OpenWrt
-  routers via ubus JSON-RPC using the Open WebUI Tools client. Use when inspecting system
-  health, network interfaces, DHCP leases, Wi-Fi radios, or reading UCI configurations.
+  routers via ubus JSON-RPC using the Open WebUI Tools client OR directly via bash/curl/ssh
+  in Open Terminal when tool calling is unavailable. Use when inspecting system health,
+  network interfaces, DHCP leases, Wi-Fi radios, or reading UCI configurations.
 ---
 
 # OpenWrt Router Management Skill
 
-This skill guides the operation, diagnostic procedures, and troubleshooting of OpenWrt routers using the Open WebUI client ([`tools/openwrt_client.py`](file:///Users/jspencer/projects/open-webui_tools/tools/openwrt_client.py)) via the `ubus` JSON-RPC interface.
+This skill guides the operation, diagnostic procedures, and troubleshooting of OpenWrt routers. It supports two execution environments:
+1. **Mode A: Open WebUI Tool Client** — When the `openwrt_client` Python tool is active in the chat.
+2. **Mode B: Open Terminal / Shell Substrate** — When Open WebUI is using `open-terminal` and cannot invoke tools directly, allowing execution via bash, `curl`, `jq`, or direct SSH to the router.
 
 ---
 
-## 1. Architecture & Protocol
+## 1. Execution Mode Detection
 
-OpenWrt exposes its internal micro-bus (`ubus`) over HTTP/HTTPS via `uhttpd` and the `rpcd` daemon at the `/ubus` endpoint.
+Before running router operations, determine your execution context:
 
 ```mermaid
 flowchart TD
-    UserChat["User in Open WebUI Chat"] -->|"Triggers Tool"| CheckCreds{"UserValves or Valves credentials"}
-    CheckCreds --> Login["POST /ubus (session.login)"]
-    Login -->|"ubus_rpc_session token"| Cache["Cache token keyed by user_id:username"]
-    Cache --> Call["Execute ubus method (e.g. system.info, network.interface.dump)"]
-    Call --> Return["Parse, redact sensitive keys, format result"]
+    Start["Request to inspect / manage OpenWrt router"] --> CheckTools{"Are Open WebUI Tools accessible?"}
+    CheckTools -->|Yes| ModeA["Mode A: Invoke openwrt_client tool methods"]
+    CheckTools -->|No / Open-Terminal| ModeB["Mode B: Run curl / ubus / ssh commands in terminal"]
 ```
 
-### Authentication & Multi-Tenant Security
-1. **Per-User Token Isolation**:
-   - Session tokens are isolated per Open WebUI user (`__user__["id"]:username`). Unprivileged users cannot hijack administrator sessions.
-2. **Session Persistence & Invalidation**:
-   - If a call returns ubus error code `6` (Permission denied / session expired), the client invalidates the cached session, logs in again, and retries the operation transparently.
-3. **Safe Ubus Allowlist & Redaction**:
-   - `call_ubus` disallows dangerous methods (`file.exec`, `file.write`) and requires an administrator role for non-allowlisted methods.
-   - `uci_get` automatically redacts sensitive keys (Wi-Fi PSKs, VPN private keys, passwords) to prevent data exfiltration.
+- **Use Mode A** if the model has access to the function-calling interface (`get_system_info`, `get_network_status`, `get_dhcp_leases`, etc.).
+- **Use Mode B** if you are operating inside an **Open Terminal** container/shell, or if tool calling fails with `Tool not found` or `Tools disabled`.
 
 ---
 
-## 2. Configuration Tiers
+## 2. Mode A: Open WebUI Tool Reference
 
-### Tool-Level Valves (`Valves`)
-Configured in Open WebUI under **Workspace > Tools > Settings**:
-- `OPENWRT_URL`: Router address (e.g., `http://192.168.1.1` or `https://router.lan`).
-- `OPENWRT_RPC_PATH`: ubus endpoint path (default: `/ubus`).
-- `OPENWRT_SKIP_TLS_VERIFY`: Set to `True` if using HTTPS with OpenWrt's default self-signed certificate.
-- `REQUEST_TIMEOUT`: HTTP connection/read timeout in seconds (default: 10s).
-- `OPENWRT_USERNAME` / `OPENWRT_PASSWORD`: Optional fallback credentials.
-
-### User-Specific Valves (`UserValves`)
-Configured by each user under chat session **Controls > Valves**:
-- `OPENWRT_USERNAME`: Router username (e.g. `root`).
-- `OPENWRT_PASSWORD`: Router login password (masked input).
-
----
-
-## 3. Tool Methods & Common Tasks
+When tools are bound and accessible, call the Python tool functions directly:
 
 ### 1. System Health & Resource Diagnostics
 - **Method**: `get_system_info()`
-- **Ubus objects**: `system.info`, `system.board`
-- **Output**: Hardware model, OpenWrt release/kernel version, uptime, 1/5/15 minute CPU load averages, memory (total/free/buffered), and swap usage.
+- **Ubus Objects**: `system.info`, `system.board`
+- **Output**: Model, OpenWrt release/kernel version, uptime, load averages, memory, and swap usage.
 
 ### 2. Network Interface & WAN Status
 - **Method**: `get_network_status()`
-- **Ubus object**: `network.interface.dump`
-- **Output**: All active interfaces (LAN, WAN, WAN6, guest), assigned IPv4/IPv6 addresses with CIDR netmasks, DNS servers, and interface uptime.
+- **Ubus Object**: `network.interface.dump`
+- **Output**: Active interfaces (LAN, WAN, WWAN), assigned IPv4/IPv6 addresses, DNS, and uptime.
 
 ### 3. Connected Devices & DHCP Leases
 - **Method**: `get_dhcp_leases()`
-- **Ubus objects**: `luci-rpc.getDHCPLeases` $\rightarrow$ `dhcp.ipv4leases` $\rightarrow$ `/tmp/dhcp.leases` fallback.
-- **Output**: List of devices currently holding DHCP leases, including hostname, assigned IP, MAC address, and lease expiration.
+- **Ubus Objects**: `luci-rpc.getDHCPLeases` $\rightarrow$ `dhcp.ipv4leases` fallback.
+- **Output**: List of active DHCP leases (hostname, assigned IP, MAC address, expiration).
 
 ### 4. Wi-Fi Radios & Clients
 - **Method**: `get_wireless_status()`
-- **Ubus object**: `network.wireless.status`
-- **Output**: Wireless physical devices (`radio0`, `radio1`), operating channels, disabled status, and configured SSIDs/interfaces.
+- **Ubus Object**: `network.wireless.status`
+- **Output**: Physical radios (`radio0`, `radio1`), channels, SSIDs, and client associations.
 
 ### 5. Inspecting UCI Configuration
 - **Method**: `uci_get(config, section=None, option=None)`
 - **Safety**: Passwords and private keys are masked with `******`.
-- **Examples**:
-  - `uci_get(config="network")`: Inspect interface and VLAN settings.
-  - `uci_get(config="wireless")`: Inspect Wi-Fi settings and radio modes.
-  - `uci_get(config="firewall")`: Inspect port forwards, zones, and rules.
-  - `uci_get(config="dhcp")`: Inspect dnsmasq and DHCP pool configurations.
+- **Examples**: `uci_get(config="network")`, `uci_get(config="wireless")`, `uci_get(config="firewall")`.
 
 ### 6. Executing Ubus Procedures
 - **Method**: `call_ubus(object_name, method, params=None)`
-- **Security**: Safe read-only methods (`system`, `network.interface`, `network.wireless`, `dhcp`, `luci-rpc`) are open to all users; other procedures require an administrator role. `file.exec` and `file.write` are strictly forbidden.
+- **Security**: Safe read-only methods are open to all users; non-allowlisted methods require Open WebUI admin role. `file.exec` and `file.write` are strictly forbidden.
 
 ### 7. Controlled System Reboot
 - **Method**: `reboot_system(confirm=True)`
-- **Safety**: Requires `confirm=True` and administrator privileges. Abrupt socket disconnects upon reboot are handled gracefully.
+- **Safety**: Requires `confirm=True` and administrator privileges.
+
+### Configuration (Valves & UserValves)
+- **Tool Valves (`Valves`)**: Set by admin under **Workspace > Tools > Settings** (`OPENWRT_URL`, `OPENWRT_RPC_PATH`, `OPENWRT_SKIP_TLS_VERIFY`, `REQUEST_TIMEOUT`).
+- **User Valves (`UserValves`)**: Set by users under chat **Controls > Valves** (`OPENWRT_USERNAME`, `OPENWRT_PASSWORD`).
 
 ---
 
-## 4. Router Prerequisites & Requirements
+## 3. Mode B: Open Terminal / Shell Playbook (ubus JSON-RPC via curl)
 
-For the client to communicate with OpenWrt, the router must have `uhttpd` and `rpcd` active (standard on OpenWrt installations with LuCI):
+When operating inside an **Open Terminal** shell without access to Open WebUI tools, communicate with OpenWrt's `rpcd` / `uhttpd` `/ubus` endpoint using `curl` and `jq`.
+
+### 1. Setup Environment Variables
 
 ```bash
-/etc/init.d/uhttpd status
-/etc/init.d/rpcd status
+export OPENWRT_URL="${OPENWRT_URL:-http://192.168.1.1}"
+export OPENWRT_RPC_PATH="${OPENWRT_RPC_PATH:-/ubus}"
+export OPENWRT_USERNAME="${OPENWRT_USERNAME:-root}"
+export OPENWRT_PASSWORD="${OPENWRT_PASSWORD:-}"
+export CURL_TLS_FLAGS=""
+
+# If router uses self-signed HTTPS:
+# export CURL_TLS_FLAGS="-k"
 ```
 
----
+### 2. Authenticate & Obtain `ubus_rpc_session` Token
 
-## 5. Standalone CLI Runbook
-
-To test router connectivity and verify credentials from the command line:
+Log into `/ubus` using `session.login` (using the bootstrap session ID `00000000000000000000000000000000`):
 
 ```bash
-python3 tools/openwrt_client.py
+LOGIN_PAYLOAD=$(cat <<EOF
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "call",
+  "params": [
+    "00000000000000000000000000000000",
+    "session",
+    "login",
+    {
+      "username": "$OPENWRT_USERNAME",
+      "password": "$OPENWRT_PASSWORD"
+    }
+  ]
+}
+EOF
+)
+
+LOGIN_RESP=$(curl -sS $CURL_TLS_FLAGS -X POST "$OPENWRT_URL$OPENWRT_RPC_PATH" \
+  -H "Content-Type: application/json" \
+  -d "$LOGIN_PAYLOAD")
+
+export UBUS_SESSION=$(echo "$LOGIN_RESP" | jq -r '.result[1].ubus_rpc_session // empty')
+
+if [ -z "$UBUS_SESSION" ]; then
+  echo "[-] OpenWrt authentication failed:"
+  echo "$LOGIN_RESP" | jq .
+  return 1 2>/dev/null || exit 1
+fi
+
+echo "[+] Authenticated with OpenWrt ubus (Session: ${UBUS_SESSION:0:8}...)"
 ```
 
-### Interactive Python Test
-```python
-from tools.openwrt_client import Tools
+### 3. Reusable Ubus Helper Function
 
-with Tools() as tool:
-    tool.valves.OPENWRT_URL = "http://192.168.1.1"
-    tool.valves.OPENWRT_USERNAME = "root"
-    tool.valves.OPENWRT_PASSWORD = "your-password"
+Define a helper function in your terminal session to make ubus calls concise:
 
-    info = tool.get_system_info()
-    print("Model:", info.get("model"))
-    print("Uptime:", info.get("uptime_seconds"), "seconds")
+```bash
+ubus_call() {
+  local obj="$1"
+  local method="$2"
+  local params="${3:-{}}"
+
+  curl -sS $CURL_TLS_FLAGS -X POST "$OPENWRT_URL$OPENWRT_RPC_PATH" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"jsonrpc\": \"2.0\",
+      \"id\": 1,
+      \"method\": \"call\",
+      \"params\": [\"$UBUS_SESSION\", \"$obj\", \"$method\", $params]
+    }"
+}
+```
+
+### 4. System Health & Hardware Diagnostics
+
+```bash
+# Board model, architecture, release, and kernel
+ubus_call system board | jq '.result[1]'
+
+# Uptime, load averages, memory, and swap
+ubus_call system info | jq '.result[1] | {
+  uptime_seconds: .uptime,
+  load: .load,
+  memory_total_mb: (.memory.total / 1048576 | round),
+  memory_free_mb: (.memory.free / 1048576 | round)
+}'
+```
+
+### 5. Network Interfaces & IP Addresses
+
+```bash
+# List all active interfaces with IP addresses
+ubus_call network.interface dump | jq '.result[1].interface[] | select(.up == true) | {
+  interface: .interface,
+  device: .l3_device,
+  ipv4: [ .["ipv4-address"][]? | "\(.address)/\(.mask)" ],
+  uptime: .uptime
+}'
+```
+
+### 6. Connected Devices & DHCP Leases
+
+```bash
+# Query active DHCP leases
+DHCP_OUT=$(ubus_call luci-rpc getDHCPLeases)
+
+if echo "$DHCP_OUT" | jq -e '.result[1].dhcp_leases' > /dev/null 2>&1; then
+  echo "$DHCP_OUT" | jq '.result[1].dhcp_leases[] | {hostname: .hostname, ip: .ipaddr, mac: .macaddr, expires: .expires}'
+else
+  # Fallback to dhcp ipv4leases
+  ubus_call dhcp ipv4leases | jq '.result[1].device[].leases[] | {hostname: .hostname, ip: .ip, mac: .mac}'
+fi
+```
+
+### 7. Wireless Radios & Wi-Fi Status
+
+```bash
+ubus_call network.wireless status | jq '.result[1] | to_entries[] | {
+  radio: .key,
+  up: .value.up,
+  disabled: .value.disabled,
+  channel: .value.config.channel,
+  ssids: [ .value.interfaces[]?.config.ssid ]
+}'
+```
+
+### 8. Inspecting UCI Configuration
+
+```bash
+# Read network UCI configuration
+ubus_call uci get '{"config": "network"}' | jq '.result[1].values'
+
+# Read wireless UCI configuration (filter out sensitive keys like key/password)
+ubus_call uci get '{"config": "wireless"}' | jq '
+  walk(if type == "object" then with_entries(if .key | test("key|password|secret|token"; "i") then .value = "******" else . end) else . end) | .result[1].values
+'
+
+# Read firewall port forwards and rules
+ubus_call uci get '{"config": "firewall"}' | jq '.result[1].values'
+```
+
+### 9. Controlled System Reboot
+
+```bash
+echo "[!] Rebooting OpenWrt router..."
+ubus_call system reboot
 ```
 
 ---
 
-## 6. Troubleshooting Common Issues
+## 4. Alternative: Direct SSH Access from Open Terminal
+
+If the router has SSH enabled (`dropbear` on port 22) and accessible from Open Terminal:
+
+```bash
+ROUTER_HOST="192.168.1.1"
+
+# Run remote ubus commands directly on the router CLI
+ssh root@$ROUTER_HOST "ubus call system info; cat /tmp/dhcp.leases"
+
+# Inspect active wireless associations
+ssh root@$ROUTER_HOST "iwinfo"
+
+# Query UCI configuration
+ssh root@$ROUTER_HOST "uci show network"
+```
+
+---
+
+## 5. Troubleshooting Common Issues
 
 | Symptom / Error | Root Cause | Solution |
 | :--- | :--- | :--- |
-| **`PermissionError: error code 1 / 6`** | Bad username or password. | Re-verify credentials in `UserValves` or `Valves`. |
-| **`ubus error code 4 (Not found)`** | The requested ubus object (e.g. `luci-rpc`) is not installed. | The client automatically falls back; install `rpcd-mod-luci` or `rpcd-mod-file` on OpenWrt if needed. |
-| **`Connection refused / 404 Not Found`** | uHTTPd is not running, or `/ubus` path is non-standard. | Ensure `/etc/init.d/uhttpd start` is running and `OPENWRT_RPC_PATH` is set to `/ubus`. |
-| **`SSL: CERTIFICATE_VERIFY_FAILED`** | OpenWrt is using a self-signed HTTPS certificate. | Set `OPENWRT_SKIP_TLS_VERIFY=True` in tool Valves settings. |
-| **`Missing credentials`** | Neither `UserValves` nor `Valves` username/password set. | Configure credentials in Open WebUI chat controls or tool settings. |
+| **`Tools disabled / Tool not found`** | Open WebUI is using `open-terminal` without Python tool bindings. | Switch to **Mode B** and use the `curl` ubus helper or direct `ssh` above. |
+| **`error code 6 (Permission denied)`** | Invalid password or ubus session expired. | Re-run the `session.login` step to obtain a fresh `UBUS_SESSION` token. |
+| **`error code 4 (Not found)`** | The requested ubus object (e.g. `luci-rpc`) is not installed on OpenWrt. | Use the standard `dhcp ipv4leases` fallback or install `rpcd-mod-luci` on OpenWrt. |
+| **`Connection refused / 404 Not Found`** | uHTTPd web server is not running on the router. | Run `/etc/init.d/uhttpd start` on the router or verify `OPENWRT_RPC_PATH` is `/ubus`. |
+| **`SSL: CERTIFICATE_VERIFY_FAILED`** | Router uses self-signed HTTPS certificate. | Pass `-k` to `curl` in Open Terminal, or set `OPENWRT_SKIP_TLS_VERIFY=True` in Mode A. |
