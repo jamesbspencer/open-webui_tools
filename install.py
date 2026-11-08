@@ -27,6 +27,12 @@ TOOLS_METADATA = [
         "file": "tools/openwrt_client.py",
         "description": "OpenWrt router management, network diagnostics, DHCP leases, and UCI configuration via ubus JSON-RPC.",
     },
+    {
+        "id": "ubuntu_ssh_client",
+        "name": "Ubuntu SSH Client",
+        "file": "tools/ubuntu_ssh_client.py",
+        "description": "Remote command execution, system diagnostics, and file management on Ubuntu Linux via SSH.",
+    },
 ]
 
 

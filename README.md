@@ -47,12 +47,42 @@ A router management and network diagnostics tool interfacing with OpenWrt's `ubu
 
 ---
 
+### 3. Ubuntu SSH Client ([`tools/ubuntu_ssh_client.py`](file:///Users/jspencer/projects/open-webui_tools/tools/ubuntu_ssh_client.py))
+
+A remote command execution, service management, and diagnostic tool for Ubuntu Linux servers via SSH.
+
+- **Capabilities**:
+  - `execute_command`: Run arbitrary shell commands on remote Ubuntu machines with timeout and output truncation.
+  - `get_system_status`: Retrieve structured OS version, uptime, load averages, memory, and root disk usage.
+  - `read_file`: Inspect remote configuration and log files.
+  - `write_file`: Safely write or update remote files using Base64 encoding.
+  - `manage_service`: Inspect or control systemd service units (`nginx`, `docker`, `ufw`, etc.).
+- **Valves**:
+  - `SSH_HOST`: Default server hostname or IP address.
+  - `SSH_PORT`: SSH port number (default: `22`).
+  - `SSH_TIMEOUT`: Command and connection timeout in seconds (default: `15`).
+  - `MAX_OUTPUT_CHARS`: Output truncation limit (default: `8000`).
+  - `SSH_USERNAME` / `SSH_PASSWORD` / `SSH_KEY`: Optional fallback credentials.
+- **UserValves**: Personal host, port, username, password, or SSH private key (PEM/OpenSSH) saved per user.
+- **Security Features**: Per-user credential isolation, masked secrets in UI, output bounds preventing LLM token exhaustion, and safe execution timeouts.
+- **Skill**: [`skills/ubuntu_ssh_client/SKILL.md`](file:///Users/jspencer/projects/open-webui_tools/skills/ubuntu_ssh_client/SKILL.md)
+
+---
+
 ## Installation in Open WebUI
 
-1. Log into your Open WebUI instance with administrator or workspace permissions.
+### Automated Deployment (`install.py`)
+Run the deployment script with your Open WebUI API key:
+
+```bash
+python3 install.py --api-key "sk-your-openwebui-api-key"
+```
+
+### Manual UI Installation
+1. Log into your Open WebUI instance with administrator permissions.
 2. Navigate to **Workspace > Tools**.
 3. Click the **+** (Add Tool) button.
-4. Copy and paste the contents of the desired tool script (`tools/openbao_client.py` or `tools/openwrt_client.py`) into the code editor.
+4. Copy and paste the contents of any tool script under `tools/` into the code editor.
 5. Click **Save**.
 
 ---
@@ -63,7 +93,7 @@ Open WebUI uses Pydantic-based **Valves** to generate interactive configuration 
 
 ### 1. Global / Tool-Level Valves (`Valves`)
 Configured by administrators in **Workspace > Tools > [Tool] > Settings (Gear Icon)**:
-- Sets default server URLs, ports, TLS verification options, timeouts, and optional shared credentials.
+- Sets default server URLs, ports, timeouts, and optional shared credentials.
 
 ### 2. User-Specific Valves (`UserValves`)
 Configured by individual users directly inside chat sessions:
@@ -74,7 +104,7 @@ Configured by individual users directly inside chat sessions:
 5. Click **Save**.
 
 > [!NOTE]
-> **Persistence & Security**: `UserValves` are stored in Open WebUI's database linked to the user's ID and persist across sessions. Session tokens are cached strictly per user, preventing multi-user credential collisions.
+> **Persistence & Security**: `UserValves` are stored in Open WebUI's database linked to the user's ID and persist across sessions. Session tokens and SSH credentials are strictly isolated per user.
 
 ---
 
@@ -88,6 +118,9 @@ python3 tools/openbao_client.py
 
 # Test OpenWrt router client
 python3 tools/openwrt_client.py
+
+# Test Ubuntu SSH client
+python3 tools/ubuntu_ssh_client.py
 ```
 
 ---
@@ -107,15 +140,20 @@ python3 -m unittest discover tests/
 ```text
 open-webui_tools/
 ├── README.md                      # Project documentation
+├── install.py                     # Automated Open WebUI deployment script
 ├── tools/
 │   ├── openbao_client.py          # OpenBao KV v2 client tool
-│   └── openwrt_client.py          # OpenWrt ubus JSON-RPC router client tool
+│   ├── openwrt_client.py          # OpenWrt ubus JSON-RPC router client tool
+│   └── ubuntu_ssh_client.py       # Ubuntu Linux SSH management client tool
 ├── skills/
 │   ├── openbao_client/
 │   │   └── SKILL.md               # OpenBao operational runbook and skill
-│   └── openwrt_client/
-│       └── SKILL.md               # OpenWrt operational runbook and skill
+│   ├── openwrt_client/
+│   │   └── SKILL.md               # OpenWrt operational runbook and skill
+│   └── ubuntu_ssh_client/
+│       └── SKILL.md               # Ubuntu SSH operational runbook and skill
 └── tests/
     ├── test_openbao_client.py     # Unit and integration tests for OpenBao client
-    └── test_openwrt_client.py     # Unit and integration tests for OpenWrt client
+    ├── test_openwrt_client.py     # Unit and integration tests for OpenWrt client
+    └── test_ubuntu_ssh_client.py  # Unit and integration tests for Ubuntu SSH client
 ```
