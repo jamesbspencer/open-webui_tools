@@ -71,8 +71,8 @@ install_tea() {
   esac
 
   echo "[*] Downloading tea CLI for linux-$TEA_ARCH..."
-  curl -sSL "https://dl.gitea.com/tea/0.9.2/tea-0.9.2-linux-$TEA_ARCH" -o ~/.local/bin/tea \
-    || curl -sSL "https://github.com/go-gitea/tea/releases/download/v0.9.2/tea-0.9.2-linux-$TEA_ARCH" -o ~/.local/bin/tea
+  curl -fsSL "https://dl.gitea.com/tea/0.9.2/tea-0.9.2-linux-$TEA_ARCH" -o ~/.local/bin/tea \
+    || curl -fsSL "https://github.com/go-gitea/tea/releases/download/v0.9.2/tea-0.9.2-linux-$TEA_ARCH" -o ~/.local/bin/tea
 
   chmod +x ~/.local/bin/tea
   echo "[+] Installed tea CLI: $(~/.local/bin/tea --version)"
@@ -90,12 +90,15 @@ install_tea
 Configure `tea` non-interactively using your personal access token:
 
 ```bash
-# Add or update login profile named 'default'
+INSECURE_FLAG=""
+[ "${GITEA_INSECURE:-false}" = "true" ] && INSECURE_FLAG="--insecure"
+
+# Add or update login profile named 'homelab'
 tea login add \
   --name homelab \
   --url "$GITEA_URL" \
   --token "$GITEA_TOKEN" \
-  --insecure=${GITEA_INSECURE:-false}
+  $INSECURE_FLAG
 
 # Set as default active login
 tea login default homelab
@@ -106,14 +109,14 @@ tea login list
 
 ### 2. Configure Git Credentials (for `git push` & `git clone`)
 
-Ensure local git commands can push and pull without prompting for credentials:
+Ensure local git commands can push and pull without prompting for credentials. Use in-memory credential caching rather than unencrypted disk storage:
 
 ```bash
-# Store credentials in memory or disk cache
-git config --global credential.helper store
+# Cache credentials in memory for 1 hour (avoids plaintext on disk)
+git config --global credential.helper 'cache --timeout=3600'
 
-# Or format clone URLs with the token:
-# git clone https://$GITEA_USER:$GITEA_TOKEN@git.spencer.lan/owner/repo.git
+# Clone securely via HTTP authorization header (avoids token in .git/config):
+git -c http.extraHeader="Authorization: token ${GITEA_TOKEN}" clone "${GITEA_URL}/owner/my-repo.git"
 ```
 
 ---
@@ -143,8 +146,10 @@ tea repos create --name "internal-infra" --description "Internal configs" --priv
 # Clone using tea (infers Gitea context)
 tea clone owner/my-repo
 
-# Alternatively via standard git using inline token auth:
-git clone "https://${GITEA_USER}:${GITEA_TOKEN}@${GITEA_URL#https://}/owner/my-repo.git"
+# Alternatively via standard git preserving protocol scheme:
+PROTO="${GITEA_URL%%://*}"
+HOST_PATH="${GITEA_URL#*://}"
+git clone "${PROTO}://${GITEA_USER}:${GITEA_TOKEN}@${HOST_PATH%/}/owner/my-repo.git"
 ```
 
 ### 4. Inspect Repository Details
@@ -182,7 +187,7 @@ tea issues create \
 ### 3. View Issue Details & Comments
 ```bash
 ISSUE_ID=12
-tea issues "$ISSUE_ID"
+tea issue "$ISSUE_ID"
 ```
 
 ### 4. Comment on an Issue
@@ -285,7 +290,7 @@ fi
 
 ### 1. Verify User Credentials
 ```bash
-curl -sS "${CURL_AUTH[@]}" "$GITEA_API/user" | jq '{username: .username, email: .email, is_admin: .is_admin}'
+curl -sS "${CURL_AUTH[@]}" "$GITEA_API/user" | jq '{login: .login, email: .email, is_admin: .is_admin}'
 ```
 
 ### 2. List User Repositories
@@ -310,8 +315,8 @@ curl -sS "${CURL_AUTH[@]}" -X POST "$GITEA_API/user/repos" \
 OWNER="my-org"
 REPO="my-repo"
 
-curl -sS "${CURL_AUTH[@]}" "$GITEA_API/repos/$OWNER/$REPO/issues?state=open" \
-  | jq '.[] | {number: .number, title: .title, user: .user.username, comments: .comments}'
+curl -sS "${CURL_AUTH[@]}" "$GITEA_API/repos/$OWNER/$REPO/issues?state=open&limit=20" \
+  | jq '.[] | {number: .number, title: .title, user: (.user.login // .user.username), comments: .comments}'
 ```
 
 ### 5. Create an Issue
@@ -354,6 +359,6 @@ curl -sS "${CURL_AUTH[@]}" -X POST "$GITEA_API/repos/$OWNER/$REPO/pulls/$PR_INDE
 | :--- | :--- | :--- |
 | **`tea: command not found`** | Binary not in container `$PATH`. | Run the `install_tea` bash snippet in Section 2 to install to `~/.local/bin/tea`. |
 | **Terminal hangs indefinitely** | `tea` opened an interactive editor ($EDITOR) for issue/PR body. | Always supply body via `--body "..."` or `--description "..."` on the command line. |
-| **`x509: certificate signed by unknown authority`** | Gitea server uses private CA or self-signed cert. | Pass `--insecure` in `tea login add`, or pass `-k` to `curl` and set `git config --global http.sslVerify false`. |
+| **`x509: certificate signed by unknown authority`** | Gitea server uses private CA or self-signed cert. | Pass `--insecure` in `tea login add`, or pass `-k` to `curl` and scope git trust: `git config --global http."${GITEA_URL%/}/".sslVerify false`. |
 | **`401 Unauthorized` / `token expired`** | Token is missing, incorrect, or lacks required scopes. | Generate a new token in Gitea under **Settings > Applications > Generate New Token** with `repo`, `issue`, and `user` scopes. |
 | **`404 Not Found` when creating PR** | Head branch does not exist on remote or was not pushed. | Run `git push -u origin <branch>` before creating the pull request. |

@@ -81,12 +81,13 @@ export CURL_TLS_FLAGS=""
 
 ### 2. Authenticate & Obtain Client Token
 
-Authenticate via the `userpass` auth engine and export `OPENBAO_TOKEN`:
+Authenticate via the `userpass` auth engine using stdin streaming to avoid process table password leaks:
 
 ```bash
-LOGIN_RESP=$(curl -sS $CURL_TLS_FLAGS -X POST "$OPENBAO_ADDR/v1/auth/userpass/login/$OPENBAO_USERNAME" \
-  -H "Content-Type: application/json" \
-  -d "{\"password\": \"$OPENBAO_PASSWORD\"}")
+LOGIN_RESP=$(jq -n --arg pwd "$OPENBAO_PASSWORD" '{password: $pwd}' | \
+  curl -sS $CURL_TLS_FLAGS -X POST "$OPENBAO_ADDR/v1/auth/userpass/login/$OPENBAO_USERNAME" \
+    -H "Content-Type: application/json" \
+    -d @-)
 
 # Extract client token
 export OPENBAO_TOKEN=$(echo "$LOGIN_RESP" | jq -r '.auth.client_token // empty')
@@ -105,14 +106,14 @@ echo "[+] Authenticated successfully with OpenBao."
 KV v2 stores secret hierarchies under `/metadata`:
 
 ```bash
-# List top-level secrets
+# List top-level secrets (null-safe traversal)
 curl -sS $CURL_TLS_FLAGS -H "X-Vault-Token: $OPENBAO_TOKEN" \
-  "$OPENBAO_ADDR/v1/$SECRETS_MOUNT/metadata?list=true" | jq -r '.data.keys[]'
+  "$OPENBAO_ADDR/v1/$SECRETS_MOUNT/metadata?list=true" | jq -r '.data.keys[]? // empty'
 
 # List subfolder secrets (e.g. apps/)
 SUBFOLDER="apps"
 curl -sS $CURL_TLS_FLAGS -H "X-Vault-Token: $OPENBAO_TOKEN" \
-  "$OPENBAO_ADDR/v1/$SECRETS_MOUNT/metadata/$SUBFOLDER?list=true" | jq -r '.data.keys[]'
+  "$OPENBAO_ADDR/v1/$SECRETS_MOUNT/metadata/$SUBFOLDER?list=true" | jq -r '.data.keys[]? // empty'
 ```
 
 ### 4. Read a Secret (KV v2)
@@ -185,8 +186,8 @@ If the `bao` or `vault` binary is installed in Open Terminal:
 # Set target address
 export VAULT_ADDR="https://vault.spencer.lan"
 
-# Authenticate
-bao login -method=userpass username="$OPENBAO_USERNAME" password="$OPENBAO_PASSWORD"
+# Authenticate via stdin to avoid exposing password in process tables
+printf '%s\n' "$OPENBAO_PASSWORD" | bao login -method=userpass username="$OPENBAO_USERNAME" password=-
 
 # List secrets
 bao kv list kv/
@@ -209,23 +210,29 @@ If Python is available in Open Terminal, you can run a self-contained Python scr
 
 ```bash
 python3 - << 'EOF'
-import json, os, urllib.request
+import json, os, ssl, urllib.request
 
 addr = os.getenv("OPENBAO_ADDR", "https://vault.spencer.lan").rstrip("/")
 user = os.getenv("OPENBAO_USERNAME")
 pwd = os.getenv("OPENBAO_PASSWORD")
 mount = os.getenv("SECRETS_MOUNT", "kv")
+skip_tls = os.getenv("OPENBAO_SKIP_TLS_VERIFY", "false").lower() in ("true", "1", "yes")
+
+ctx = ssl.create_default_context()
+if skip_tls:
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
 
 # 1. Login
 login_data = json.dumps({"password": pwd}).encode("utf-8")
 req = urllib.request.Request(f"{addr}/v1/auth/userpass/login/{user}", data=login_data, headers={"Content-Type": "application/json"})
-with urllib.request.urlopen(req) as resp:
+with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
     token = json.loads(resp.read().decode())["auth"]["client_token"]
 
 # 2. Read Secret
 secret_path = "database/production"
 req = urllib.request.Request(f"{addr}/v1/{mount}/data/{secret_path}", headers={"X-Vault-Token": token})
-with urllib.request.urlopen(req) as resp:
+with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
     secret = json.loads(resp.read().decode())["data"]["data"]
     print("Retrieved secret keys:", list(secret.keys()))
 EOF

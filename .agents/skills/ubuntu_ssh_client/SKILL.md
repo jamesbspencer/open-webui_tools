@@ -109,6 +109,7 @@ ssh_exec() {
       -i "$SSH_KEY_FILE" \
       -p "$SSH_PORT" \
       -o ConnectTimeout="$SSH_TIMEOUT" \
+      -o BatchMode=yes \
       -o StrictHostKeyChecking=accept-new \
       -n \
       "$SSH_USERNAME@$SSH_HOST" "$remote_cmd"
@@ -171,7 +172,7 @@ ssh_exec "head -n 100 -- '$REMOTE_FILE'"
 ssh_exec "grep -rn 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null"
 ```
 
-#### Safely Write Remote Files (Base64 Transport)
+#### Safely Write Remote Files (Stdin Stream)
 To write files safely without escaping quotes or breaking formatting:
 
 ```bash
@@ -181,8 +182,14 @@ CONTENT="server {
     server_name example.local;
 }"
 
-B64=$(echo -n "$CONTENT" | base64)
-ssh_exec "echo '$B64' | base64 -d > '$REMOTE_DEST'"
+# Safely transmit content via SSH stdin without shell escaping issues:
+printf '%s' "$CONTENT" | ssh \
+  -i "$SSH_KEY_FILE" \
+  -p "$SSH_PORT" \
+  -o ConnectTimeout="$SSH_TIMEOUT" \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new \
+  "$SSH_USERNAME@$SSH_HOST" "cat > $(printf '%q' "$REMOTE_DEST")"
 echo "[+] Successfully wrote $REMOTE_DEST"
 ```
 
@@ -219,9 +226,14 @@ ssh_exec "journalctl -u $SERVICE -n 30 --no-pager"
 
 When executing commands over SSH from Open Terminal:
 1. **Never run interactive prompts**: Always add non-interactive flags (e.g. `DEBIAN_FRONTEND=noninteractive apt-get update -y`).
-2. **Handle sudo passwords**: If running sudo commands with password auth, pipe the password via stdin:
+2. **Handle sudo passwords**: Stream the password securely via stdin rather than interpolating into command strings:
    ```bash
-   ssh_exec "echo '$SSH_PASSWORD' | sudo -S systemctl restart nginx"
+   printf '%s\n' "$SSH_PASSWORD" | ssh \
+     -i "$SSH_KEY_FILE" \
+     -p "$SSH_PORT" \
+     -o ConnectTimeout="$SSH_TIMEOUT" \
+     -o StrictHostKeyChecking=accept-new \
+     "$SSH_USERNAME@$SSH_HOST" "sudo -S -p '' systemctl restart nginx"
    ```
 3. **Bound Output**: Prevent log flooding by piping commands to `head -n 50` or `tail -n 50`.
 

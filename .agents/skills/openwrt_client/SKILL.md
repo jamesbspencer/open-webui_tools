@@ -96,23 +96,23 @@ export CURL_TLS_FLAGS=""
 Log into `/ubus` using `session.login` (using the bootstrap session ID `00000000000000000000000000000000`):
 
 ```bash
-LOGIN_PAYLOAD=$(cat <<EOF
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "call",
-  "params": [
-    "00000000000000000000000000000000",
-    "session",
-    "login",
-    {
-      "username": "$OPENWRT_USERNAME",
-      "password": "$OPENWRT_PASSWORD"
-    }
-  ]
-}
-EOF
-)
+LOGIN_PAYLOAD=$(jq -n \
+  --arg user "$OPENWRT_USERNAME" \
+  --arg pass "$OPENWRT_PASSWORD" \
+  '{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "call",
+    params: [
+      "00000000000000000000000000000000",
+      "session",
+      "login",
+      {
+        username: $user,
+        password: $pass
+      }
+    ]
+  }')
 
 LOGIN_RESP=$(curl -sS $CURL_TLS_FLAGS -X POST "$OPENWRT_URL$OPENWRT_RPC_PATH" \
   -H "Content-Type: application/json" \
@@ -168,8 +168,8 @@ ubus_call system info | jq '.result[1] | {
 ### 5. Network Interfaces & IP Addresses
 
 ```bash
-# List all active interfaces with IP addresses
-ubus_call network.interface dump | jq '.result[1].interface[] | select(.up == true) | {
+# List all active interfaces with IP addresses (null-safe traversal)
+ubus_call network.interface dump | jq '.result[1]?.interface[]? | select(.up == true) | {
   interface: .interface,
   device: .l3_device,
   ipv4: [ .["ipv4-address"][]? | "\(.address)/\(.mask)" ],
@@ -183,18 +183,18 @@ ubus_call network.interface dump | jq '.result[1].interface[] | select(.up == tr
 # Query active DHCP leases
 DHCP_OUT=$(ubus_call luci-rpc getDHCPLeases)
 
-if echo "$DHCP_OUT" | jq -e '.result[1].dhcp_leases' > /dev/null 2>&1; then
-  echo "$DHCP_OUT" | jq '.result[1].dhcp_leases[] | {hostname: .hostname, ip: .ipaddr, mac: .macaddr, expires: .expires}'
+if echo "$DHCP_OUT" | jq -e '.result[1]?.dhcp_leases' > /dev/null 2>&1; then
+  echo "$DHCP_OUT" | jq '.result[1]?.dhcp_leases[]? | {hostname: .hostname, ip: .ipaddr, mac: .macaddr, expires: .expires}'
 else
   # Fallback to dhcp ipv4leases
-  ubus_call dhcp ipv4leases | jq '.result[1].device[].leases[] | {hostname: .hostname, ip: .ip, mac: .mac}'
+  ubus_call dhcp ipv4leases | jq '.result[1]?.device[]?.leases[]? | {hostname: .hostname, ip: .ip, mac: .mac}'
 fi
 ```
 
 ### 7. Wireless Radios & Wi-Fi Status
 
 ```bash
-ubus_call network.wireless status | jq '.result[1] | to_entries[] | {
+ubus_call network.wireless status | jq '.result[1]? | to_entries[]? | {
   radio: .key,
   up: .value.up,
   disabled: .value.disabled,
@@ -206,16 +206,18 @@ ubus_call network.wireless status | jq '.result[1] | to_entries[] | {
 ### 8. Inspecting UCI Configuration
 
 ```bash
-# Read network UCI configuration
-ubus_call uci get '{"config": "network"}' | jq '.result[1].values'
+# Read network UCI configuration (filter out sensitive keys like passwords or WireGuard private keys)
+ubus_call uci get '{"config": "network"}' | jq '
+  walk(if type == "object" then with_entries(if .key | test("key|password|secret|token|private"; "i") then .value = "******" else . end) else . end) | .result[1]?.values
+'
 
 # Read wireless UCI configuration (filter out sensitive keys like key/password)
 ubus_call uci get '{"config": "wireless"}' | jq '
-  walk(if type == "object" then with_entries(if .key | test("key|password|secret|token"; "i") then .value = "******" else . end) else . end) | .result[1].values
+  walk(if type == "object" then with_entries(if .key | test("key|password|secret|token"; "i") then .value = "******" else . end) else . end) | .result[1]?.values
 '
 
 # Read firewall port forwards and rules
-ubus_call uci get '{"config": "firewall"}' | jq '.result[1].values'
+ubus_call uci get '{"config": "firewall"}' | jq '.result[1]?.values'
 ```
 
 ### 9. Controlled System Reboot
@@ -229,19 +231,20 @@ ubus_call system reboot
 
 ## 4. Alternative: Direct SSH Access from Open Terminal
 
-If the router has SSH enabled (`dropbear` on port 22) and accessible from Open Terminal:
+If the router has SSH enabled (`dropbear` on port 22) and accessible from Open Terminal, always supply non-blocking options (`-n`, `-o BatchMode=yes`, `-o ConnectTimeout=10`, `-o StrictHostKeyChecking=accept-new`) to prevent the terminal from hanging on host-key prompts or stdin:
 
 ```bash
-ROUTER_HOST="192.168.1.1"
+ROUTER_HOST="${OPENWRT_HOST:-192.168.1.1}"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -n)
 
 # Run remote ubus commands directly on the router CLI
-ssh root@$ROUTER_HOST "ubus call system info; cat /tmp/dhcp.leases"
+ssh "${SSH_OPTS[@]}" "root@$ROUTER_HOST" "ubus call system info; cat /tmp/dhcp.leases"
 
 # Inspect active wireless associations
-ssh root@$ROUTER_HOST "iwinfo"
+ssh "${SSH_OPTS[@]}" "root@$ROUTER_HOST" "iwinfo"
 
 # Query UCI configuration
-ssh root@$ROUTER_HOST "uci show network"
+ssh "${SSH_OPTS[@]}" "root@$ROUTER_HOST" "uci show network"
 ```
 
 ---

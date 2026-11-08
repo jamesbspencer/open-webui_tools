@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Install / Update tools and skills on an Open WebUI instance (e.g. https://ai.jamesspencer.me).
+Install / Update tools and skills on an Open WebUI instance.
 """
 
 from __future__ import annotations
@@ -43,19 +43,19 @@ SKILLS_METADATA = [
         "id": "openbao_client",
         "name": "OpenBao KV Client",
         "file": "skills/openbao_client/SKILL.md",
-        "description": "Operational runbook and guidance for managing and interacting with OpenBao / Vault KV v2 secrets via Open WebUI Tools.",
+        "description": "Operational runbook and guidance for managing OpenBao / Vault KV v2 secrets via Open WebUI Tools OR directly via bash/curl in Open Terminal.",
     },
     {
         "id": "openwrt_client",
         "name": "OpenWrt Router Client",
         "file": "skills/openwrt_client/SKILL.md",
-        "description": "Operational runbook and guidance for querying, inspecting, and managing OpenWrt routers via ubus JSON-RPC.",
+        "description": "Operational runbook for querying and managing OpenWrt routers via ubus JSON-RPC OR directly via bash/curl/ssh in Open Terminal.",
     },
     {
         "id": "ubuntu_ssh_client",
         "name": "Ubuntu SSH Client",
         "file": "skills/ubuntu_ssh_client/SKILL.md",
-        "description": "Operational runbook and troubleshooting guidance for managing Ubuntu Linux systems via SSH.",
+        "description": "Operational runbook and troubleshooting guidance for managing Ubuntu Linux via SSH using Tools OR native OpenSSH in Open Terminal.",
     },
     {
         "id": "gitea_cli",
@@ -66,22 +66,26 @@ SKILLS_METADATA = [
 ]
 
 
-def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
-    tool_id = tool_info["id"]
-    name = tool_info["name"]
-    file_path = REPO_ROOT / tool_info["file"]
+def _deploy_item(endpoint_prefix: str, item_info: dict, base_url: str, api_key: str) -> bool:
+    """Deploy or update a tool or skill in Open WebUI."""
+    item_id = item_info["id"]
+    name = item_info["name"]
+    description = item_info["description"]
+    file_path = REPO_ROOT / item_info["file"]
+    singular_label = endpoint_prefix.rstrip("s")
 
     if not file_path.is_file():
-        print(f"[-] Error: tool file not found: {file_path}")
+        print(f"[-] Error: {singular_label} file not found: {file_path}")
         return False
 
     content = file_path.read_text(encoding="utf-8")
     payload = {
-        "id": tool_id,
+        "id": item_id,
         "name": name,
+        "description": description,
         "content": content,
         "meta": {
-            "description": tool_info["description"],
+            "description": description,
         },
     }
 
@@ -93,8 +97,8 @@ def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
 
     base = base_url.rstrip("/")
 
-    # Check if tool already exists
-    check_url = f"{base}/api/v1/tools/id/{tool_id}"
+    # Check if item already exists
+    check_url = f"{base}/api/v1/{endpoint_prefix}/id/{item_id}"
     exists = False
     try:
         check_req = urllib.request.Request(check_url, headers=headers, method="GET")
@@ -106,117 +110,60 @@ def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
             exists = False
         elif e.code in (401, 403):
             print(f"[-] Authentication failed (HTTP {e.code}). Please verify your Open WebUI API key.")
+            e.close()
             return False
         else:
-            exists = False
-    except Exception:
-        exists = False
+            body = e.read(4096).decode("utf-8", errors="replace")
+            print(f"[-] Error checking {singular_label} '{item_id}' (HTTP {e.code}): {body}")
+            e.close()
+            return False
+    except Exception as e:
+        print(f"[-] Connection failed during existence check for {singular_label} '{item_id}': {e}")
+        return False
 
     data_bytes = json.dumps(payload).encode("utf-8")
 
     if exists:
-        url = f"{base}/api/v1/tools/id/{tool_id}/update"
+        url = f"{base}/api/v1/{endpoint_prefix}/id/{item_id}/update"
         action = "Updating"
     else:
-        url = f"{base}/api/v1/tools/create"
+        url = f"{base}/api/v1/{endpoint_prefix}/create"
         action = "Creating"
 
-    print(f"[*] {action} tool '{name}' (id: {tool_id}) on {base}...")
+    print(f"[*] {action} {singular_label} '{name}' (id: {item_id}) on {base}...")
 
     req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             if resp.status in (200, 201):
-                print(f"[+] Successfully installed tool '{name}'!")
+                print(f"[+] Successfully installed {singular_label} '{name}'!")
                 return True
             else:
-                body = resp.read().decode("utf-8", errors="replace")
+                body = resp.read(4096).decode("utf-8", errors="replace")
                 print(f"[-] Server returned unexpected status {resp.status}: {body}")
                 return False
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
+        body = e.read(4096).decode("utf-8", errors="replace")
         print(f"[-] HTTP Error {e.code}: {body}")
+        e.close()
         return False
     except Exception as e:
         print(f"[-] Connection failed: {e}")
         return False
+
+
+def install_tool(base_url: str, api_key: str, tool_info: dict) -> bool:
+    """Install or update a tool."""
+    return _deploy_item("tools", tool_info, base_url, api_key)
 
 
 def install_skill(base_url: str, api_key: str, skill_info: dict) -> bool:
-    skill_id = skill_info["id"]
-    name = skill_info["name"]
-    file_path = REPO_ROOT / skill_info["file"]
-
-    if not file_path.is_file():
-        print(f"[-] Error: skill file not found: {file_path}")
-        return False
-
-    content = file_path.read_text(encoding="utf-8")
-    payload = {
-        "id": skill_id,
-        "name": name,
-        "description": skill_info["description"],
-        "content": content,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-    base = base_url.rstrip("/")
-
-    # Check if skill already exists
-    check_url = f"{base}/api/v1/skills/id/{skill_id}"
-    exists = False
-    try:
-        check_req = urllib.request.Request(check_url, headers=headers, method="GET")
-        with urllib.request.urlopen(check_req, timeout=15) as resp:
-            if resp.status == 200:
-                exists = True
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            exists = False
-        elif e.code in (401, 403):
-            print(f"[-] Authentication failed (HTTP {e.code}). Please verify your Open WebUI API key.")
-            return False
-        else:
-            exists = False
-    except Exception:
-        exists = False
-
-    data_bytes = json.dumps(payload).encode("utf-8")
-
-    if exists:
-        url = f"{base}/api/v1/skills/id/{skill_id}/update"
-        action = "Updating"
-    else:
-        url = f"{base}/api/v1/skills/create"
-        action = "Creating"
-
-    print(f"[*] {action} skill '{name}' (id: {skill_id}) on {base}...")
-
-    req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status in (200, 201):
-                print(f"[+] Successfully installed skill '{name}'!")
-                return True
-            else:
-                body = resp.read().decode("utf-8", errors="replace")
-                print(f"[-] Server returned unexpected status {resp.status}: {body}")
-                return False
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"[-] HTTP Error {e.code}: {body}")
-        return False
-    except Exception as e:
-        print(f"[-] Connection failed: {e}")
-        return False
+    """Install or update a skill."""
+    return _deploy_item("skills", skill_info, base_url, api_key)
 
 
 def load_dotenv():
+    """Load configuration from local .env file."""
     env_path = REPO_ROOT / ".env"
     if env_path.is_file():
         for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -227,33 +174,43 @@ def load_dotenv():
                 v = v.strip().strip("'\"")
                 if k in ("open_webui_api", "openwebui_api_key", "open_webui_api_key", "api_key"):
                     os.environ.setdefault("OPENWEBUI_API_KEY", v)
+                elif k in ("open_webui_url", "openwebui_url"):
+                    os.environ.setdefault("OPENWEBUI_URL", v)
 
 
-def main():
-    load_dotenv()
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for install.py."""
     parser = argparse.ArgumentParser(
         description="Deploy tools and skills to an Open WebUI instance."
     )
     parser.add_argument(
         "--url",
-        default="https://ai.jamesspencer.me",
-        help="Base URL of Open WebUI (default: https://ai.jamesspencer.me)",
+        default=os.environ.get("OPENWEBUI_URL", "http://localhost:3000"),
+        help="Base URL of Open WebUI (default: $OPENWEBUI_URL or http://localhost:3000)",
     )
     parser.add_argument(
         "--api-key",
         default=os.environ.get("OPENWEBUI_API_KEY"),
         help="Open WebUI API Key (or set OPENWEBUI_API_KEY env var)",
     )
-    parser.add_argument(
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--tools-only",
         action="store_true",
         help="Deploy only tools",
     )
-    parser.add_argument(
+    mode_group.add_argument(
         "--skills-only",
         action="store_true",
         help="Deploy only skills",
     )
+    return parser
+
+
+def main():
+    load_dotenv()
+    parser = build_parser()
     args = parser.parse_args()
 
     api_key = args.api_key
@@ -289,7 +246,7 @@ def main():
                 all_success = False
 
     if all_success:
-        print("\n[+] All tools and skills deployed successfully to Open WebUI!")
+        print("\n[+] All requested tools and skills deployed successfully to Open WebUI!")
     else:
         print("\n[-] Some items failed to deploy. See errors above.")
         sys.exit(1)

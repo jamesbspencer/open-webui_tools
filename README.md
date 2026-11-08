@@ -4,7 +4,7 @@ A collection of custom tools and extensions for [Open WebUI](https://github.com/
 
 ---
 
-## Available Tools
+## Available Tools & Skills
 
 ### 1. OpenBao / Vault KV Client ([`tools/openbao_client.py`](file:///Users/jspencer/projects/open-webui_tools/tools/openbao_client.py))
 
@@ -157,6 +157,12 @@ python3 -m unittest discover tests/
 
 ```text
 open-webui_tools/
+├── .agents/
+│   └── skills/                    # Antigravity workspace skill discovery mirrors
+│       ├── gitea_cli/SKILL.md
+│       ├── openbao_client/SKILL.md
+│       ├── openwrt_client/SKILL.md
+│       └── ubuntu_ssh_client/SKILL.md
 ├── .github/
 │   └── workflows/
 │       └── test.yml               # GitHub Actions CI matrix (Python 3.10–3.13)
@@ -176,6 +182,7 @@ open-webui_tools/
 │   └── ubuntu_ssh_client/
 │       └── SKILL.md               # Ubuntu SSH operational runbook and skill
 └── tests/
+    ├── test_install.py            # Unit tests for install.py and skills parity
     ├── test_openbao_client.py     # Unit and integration tests for OpenBao client
     ├── test_openwrt_client.py     # Unit and integration tests for OpenWrt client
     └── test_ubuntu_ssh_client.py  # Unit and integration tests for Ubuntu SSH client
