@@ -72,18 +72,20 @@ A remote command execution, service management, and diagnostic tool for Ubuntu L
 ## Installation in Open WebUI
 
 ### Automated Deployment (`install.py`)
-Run the deployment script with your Open WebUI API key:
+Deploy all tools and skills directly to Open WebUI with your API key:
 
 ```bash
+# Deploy all tools and skills
 python3 install.py --api-key "sk-your-openwebui-api-key"
+
+# Or deploy selectively
+python3 install.py --tools-only
+python3 install.py --skills-only
 ```
 
 ### Manual UI Installation
-1. Log into your Open WebUI instance with administrator permissions.
-2. Navigate to **Workspace > Tools**.
-3. Click the **+** (Add Tool) button.
-4. Copy and paste the contents of any tool script under `tools/` into the code editor.
-5. Click **Save**.
+- **Tools**: In Open WebUI, navigate to **Workspace > Tools**, click **+**, paste the tool file from `tools/`, and save.
+- **Skills**: In Open WebUI, navigate to **Workspace > Skills**, click **+**, paste the skill markdown from `skills/<tool>/SKILL.md`, and save.
 
 ---
 
